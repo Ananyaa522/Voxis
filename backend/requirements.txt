@@ -5,4 +5,5 @@ torch
 transformers>=4.40
 huggingface_hub
 numpy
+silero-vad>=6.2.3,<7
 # system dependency (not pip): ffmpeg must be on PATH

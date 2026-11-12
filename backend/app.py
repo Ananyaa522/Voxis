@@ -28,11 +28,18 @@ HUB_REPO = os.getenv("ASR_HUB_REPO", "")
 MAX_UPLOAD_MB = int(os.getenv("ASR_MAX_UPLOAD_MB", "50"))
 MAX_SECONDS = int(os.getenv("ASR_MAX_SECONDS", "900"))
 DUMMY = os.getenv("ASR_DUMMY") == "1"
+VAD_ENABLED = os.getenv("ASR_VAD_ENABLED", "1").strip().lower() not in {"0", "false", "no", "off"}
+VAD_THRESHOLD = 0.5
+VAD_MIN_SPEECH_MS = 250
+VAD_MIN_SILENCE_MS = 500
+VAD_SPEECH_PAD_MS = 300
 LANGS = {"en": "English", "hi": "Hindi"}
 
 PIPES: dict = {}
 LOCKS = {k: threading.Lock() for k in LANGS}          # a pipeline is not thread-safe
-STATE = {"ready": False, "error": None, "device": "cpu"}
+VAD_MODEL = None
+VAD_LOCK = threading.Lock()
+STATE = {"ready": False, "error": None, "device": "cpu", "vad_ready": False}
 
 
 def ensure_models() -> None:
@@ -47,8 +54,15 @@ def ensure_models() -> None:
 
 def load_models() -> None:
     """Runs in a background thread so the web server answers /api/health immediately."""
+    global VAD_MODEL
     try:
         import torch
+        if VAD_ENABLED:
+            from silero_vad import load_silero_vad
+
+            log.info("Loading Silero VAD...")
+            VAD_MODEL = load_silero_vad()
+            STATE["vad_ready"] = True
         ensure_models()
         use_gpu = torch.cuda.is_available() and os.getenv("ASR_DEVICE", "auto") != "cpu"
         device, STATE["device"] = (0, "cuda") if use_gpu else (-1, "cpu")
@@ -94,6 +108,29 @@ def decode_audio(raw: bytes, filename: str) -> np.ndarray:
     return np.frombuffer(p.stdout, dtype=np.float32).copy()
 
 
+def remove_non_speech(audio: np.ndarray) -> np.ndarray:
+    """Keep Silero-detected speech (including padded boundaries) from mono 16 kHz audio."""
+    import torch
+    from silero_vad import get_speech_timestamps
+
+    if VAD_MODEL is None:
+        raise HTTPException(503, "Speech activity detector is not ready.")
+    waveform = torch.from_numpy(np.ascontiguousarray(audio))
+    with VAD_LOCK, torch.inference_mode():
+        timestamps = get_speech_timestamps(
+            waveform,
+            VAD_MODEL,
+            sampling_rate=ac.TARGET_SR,
+            threshold=VAD_THRESHOLD,
+            min_speech_duration_ms=VAD_MIN_SPEECH_MS,
+            min_silence_duration_ms=VAD_MIN_SILENCE_MS,
+            speech_pad_ms=VAD_SPEECH_PAD_MS,
+        )
+    if not timestamps:
+        raise HTTPException(422, "No speech detected in audio.")
+    return np.concatenate([audio[segment["start"]:segment["end"]] for segment in timestamps])
+
+
 def prettify(text: str, lang: str) -> str:
     """Cosmetic only: the English model emits UPPERCASE without punctuation."""
     text = " ".join(text.split())
@@ -106,7 +143,8 @@ def prettify(text: str, lang: str) -> str:
 @api.get("/health")
 def health():
     return {"status": "ok", "ready": STATE["ready"], "error": STATE["error"],
-            "device": STATE["device"], "languages": LANGS}
+            "device": STATE["device"], "languages": LANGS,
+            "vad": {"enabled": VAD_ENABLED, "ready": STATE["vad_ready"]}}
 
 
 @api.post("/transcribe")
@@ -128,15 +166,23 @@ def transcribe(file: UploadFile = File(...), language: str = Form("en")):
         raise HTTPException(400, "Audio is too short.")
     if duration > MAX_SECONDS:
         raise HTTPException(413, f"Audio longer than {MAX_SECONDS} s.")
-    t0 = time.time()
+    speech_seconds = duration
+    vad_applied = False
+    t0 = time.perf_counter()
     if DUMMY:
         text = "dummy transcript for UI testing"
     else:
+        if VAD_ENABLED:
+            audio = remove_non_speech(audio)
+            speech_seconds = len(audio) / ac.TARGET_SR
+            vad_applied = True
         with LOCKS[language]:
             text = ac.transcribe_ctc(PIPES[language], audio)
-    took = time.time() - t0
+    took = time.perf_counter() - t0
     return {"language": language, "text": prettify(text, language), "audio_seconds": round(duration, 2),
-            "processing_seconds": round(took, 2), "rtf": round(took / duration, 3), "device": STATE["device"]}
+            "speech_seconds": round(speech_seconds, 2), "vad_applied": vad_applied,
+            "processing_seconds": round(took, 2), "rtf": round(took / duration, 3),
+            "device": STATE["device"]}
 
 
 app.include_router(api)

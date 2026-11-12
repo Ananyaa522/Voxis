@@ -5,3 +5,4 @@ backend/models/
 .env
 *.pyc
 backend/venv/
+.vscode/
