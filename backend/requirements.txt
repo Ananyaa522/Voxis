@@ -1,0 +1,8 @@
+fastapi>=0.110
+uvicorn[standard]>=0.29
+python-multipart>=0.0.9
+torch
+transformers>=4.40
+huggingface_hub
+numpy
+# system dependency (not pip): ffmpeg must be on PATH
