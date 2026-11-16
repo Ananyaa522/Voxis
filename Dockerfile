@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir -r backend/requirements.txt
 COPY --chown=user backend/ backend/
 COPY --chown=user --from=ui /ui/dist frontend/dist
 
-ENV ASR_HUB_REPO=An05/asr-final ASR_MODELS_DIR=/home/user/app/models ASR_DEVICE=auto
+ENV ASR_HUB_REPO=Ananyaa05/asr-final ASR_MODELS_DIR=/home/user/app/models ASR_DEVICE=auto
 WORKDIR $HOME/app/backend
 EXPOSE 7860
 CMD ["uvicorn", "app:app", "--host", "0.0.0.0", "--port", "7860"]
